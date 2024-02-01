@@ -3,13 +3,8 @@ use keyvalue::{
     RetrieveRequest, RetrieveResponse, StoreRequest, StoreResponse,
 };
 use sqlx::{migrate::MigrateDatabase, Row, Sqlite, SqlitePool};
-use tonic::{transport::Server, Request, Response, Status};
 use tokio::{sync::Semaphore, time::sleep};
-
-const DB_URL: &str = "sqlite://kv.db";
-
-/// rate limiting: 10 concurrent requests
-static PERMITS: Semaphore = Semaphore::const_new(10);
+use tonic::{transport::Server, Request, Response, Status};
 
 pub mod keyvalue {
     tonic::include_proto!("keyvalue");
@@ -17,6 +12,39 @@ pub mod keyvalue {
 
 pub struct KeyValueService {
     conn: sqlx::Pool<Sqlite>,
+}
+
+const DB_URL: &str = "sqlite://kv.db";
+
+/// rate limiting: 10 concurrent requests
+static PERMITS: Semaphore = Semaphore::const_new(10);
+
+impl KeyValueService {
+    pub async fn new(db_url: &str) -> Self {
+        if !Sqlite::database_exists(db_url).await.unwrap_or(false) {
+            println!("Creating database {}", db_url);
+            match Sqlite::create_database(db_url).await {
+                Ok(_) => println!("Create db success"),
+                Err(error) => panic!("error: {}", error),
+            }
+        } else {
+            println!("Database already exists");
+        }
+
+        let conn = SqlitePool::connect(db_url).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS key_value_store (
+            key TEXT UNIQUE,
+            value TEXT
+         )",
+        )
+        .execute(&conn)
+        .await
+        .expect("Failed to create table");
+
+        Self { conn }
+    }
 }
 
 #[tonic::async_trait]
@@ -34,9 +62,10 @@ impl KeyValue for KeyValueService {
             .bind(&request.get_ref().key)
             .bind(&request.get_ref().value)
             .execute(&self.conn)
-            .await {
-                Ok(_) => Ok(Response::new(StoreResponse {})),
-                Err(e) => Err(Status::already_exists(e.to_string())),
+            .await
+        {
+            Ok(_) => Ok(Response::new(StoreResponse {})),
+            Err(e) => Err(Status::already_exists(e.to_string())),
         }
     }
 
@@ -49,12 +78,13 @@ impl KeyValue for KeyValueService {
         // simulating some heavy work, for demonstration of rate limiting
         let _t = sleep(std::time::Duration::from_millis(200)).await;
 
-        let rows = match sqlx::query("SELECT value FROM key_value_store WHERE key = $1",)
+        let rows = match sqlx::query("SELECT value FROM key_value_store WHERE key = $1")
             .bind(&request.get_ref().key)
             .fetch_one(&self.conn)
-            .await {
-                Ok(r) => r,
-                Err(e) => return Err(Status::not_found(e.to_string())),
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return Err(Status::not_found(e.to_string())),
         };
 
         if rows.len() == 0 {
@@ -69,32 +99,8 @@ impl KeyValue for KeyValueService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let kv_service = KeyValueService::new(DB_URL).await;
     let address = "[::1]:50051".parse().unwrap();
-
-    if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
-        println!("Creating database {}", DB_URL);
-        match Sqlite::create_database(DB_URL).await {
-            Ok(_) => println!("Create db success"),
-            Err(error) => panic!("error: {}", error),
-        }
-    } else {
-        println!("Database already exists");
-    }
-
-    let kv_service = KeyValueService {
-        conn: SqlitePool::connect(DB_URL).await.unwrap(),
-    };
-
-    // id INTEGER PRIMARY KEY,
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS key_value_store (
-            key TEXT UNIQUE,
-            value TEXT
-         )",
-    )
-    .execute(&kv_service.conn)
-    .await
-    .expect("Failed to create table");
 
     Server::builder()
         .add_service(KeyValueServer::new(kv_service))
