@@ -9,8 +9,8 @@
 - **Rate Limiting**: Implement rate limiting on the server to manage the load and ensure efficient resource utilization.
 
 ## Technologies used
-**Tokio**: Async Runtime
-**Tonic**: RPC server
-**Sqlx**: Framework for DB connection
-**Sqlite**: Database
-**grpcurl**: Testing script
+**Tokio**: Async Runtime  
+**Tonic**: RPC server  
+**Sqlx**: Framework for DB connection  
+**Sqlite**: Database  
+**grpcurl**: Testing script  
