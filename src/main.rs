@@ -2,11 +2,13 @@ use keyvalue::{
     key_value_server::{KeyValue, KeyValueServer},
     RetrieveRequest, RetrieveResponse, StoreRequest, StoreResponse,
 };
-use tokio::{sync::Semaphore, time::sleep};
+use tokio::time::sleep;
 use tonic::{transport::Server, Request, Response, Status};
 
 mod db_handler;
-use db_handler::{DBHandler, DBError};
+use db_handler::{DBError, DBHandler};
+
+use leaky_bucket::RateLimiter;
 
 pub mod keyvalue {
     tonic::include_proto!("keyvalue");
@@ -14,15 +16,14 @@ pub mod keyvalue {
 
 pub struct KeyValueService {
     db: DBHandler,
+    rate_limiter: RateLimiter,
 }
-
-/// rate limiting: 10 concurrent requests
-static PERMITS: Semaphore = Semaphore::const_new(10);
 
 impl KeyValueService {
     pub async fn new() -> Result<Self, DBError> {
         let db = DBHandler::connect().await?;
-        Ok(Self { db })
+        let rate_limiter = RateLimiter::builder().max(100).initial(0).refill(2).build();
+        Ok(Self { db, rate_limiter })
     }
 }
 
@@ -32,19 +33,19 @@ impl KeyValue for KeyValueService {
         &self,
         request: Request<StoreRequest>,
     ) -> Result<Response<StoreResponse>, Status> {
-        let _permit = PERMITS.acquire().await.unwrap();
-
+        self.rate_limiter.acquire_one().await;
         // simulating some heavy work, for demonstration of rate limiting
         let _t = sleep(std::time::Duration::from_millis(200)).await;
-        self.db.store(&request.get_ref().key, &request.get_ref().value).await
+        self.db
+            .store(&request.get_ref().key, &request.get_ref().value)
+            .await
     }
 
     async fn retrieve(
         &self,
         request: Request<RetrieveRequest>,
     ) -> Result<Response<RetrieveResponse>, Status> {
-        let _permit = PERMITS.acquire().await.unwrap();
-
+        self.rate_limiter.acquire_one().await;
         // simulating some heavy work, for demonstration of rate limiting
         let _t = sleep(std::time::Duration::from_millis(200)).await;
         self.db.retrieve(&request.get_ref().key).await
